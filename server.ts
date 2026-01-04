@@ -436,7 +436,74 @@ app.get("/stream", async (req, res) => {
   res.end();
 });
 
-const PORT = 3000;
-app.listen(PORT, () => {
+/**
+ * Parse port from command line arguments, environment variable, or use default.
+ * Priority: CLI args (--port or -p) > PORT env var > default (3000)
+ */
+function parsePort(): number {
+  const args = process.argv.slice(2);
+
+  // Check for --port=VALUE or -p=VALUE
+  for (const arg of args) {
+    if (arg.startsWith('--port=')) {
+      return parseInt(arg.slice(7), 10);
+    }
+    if (arg.startsWith('-p=')) {
+      return parseInt(arg.slice(3), 10);
+    }
+  }
+
+  // Check for --port VALUE or -p VALUE
+  for (let i = 0; i < args.length; i++) {
+    if ((args[i] === '--port' || args[i] === '-p') && args[i + 1]) {
+      return parseInt(args[i + 1], 10);
+    }
+  }
+
+  // Check environment variable
+  if (process.env.PORT) {
+    return parseInt(process.env.PORT, 10);
+  }
+
+  // Default port
+  return 3000;
+}
+
+/**
+ * Validate that the port is a valid port number (1-65535)
+ */
+function validatePort(port: number): void {
+  if (isNaN(port)) {
+    console.error('Error: Invalid port number. Port must be a number.');
+    process.exit(1);
+  }
+  if (port < 1 || port > 65535) {
+    console.error(`Error: Port ${port} is out of range. Port must be between 1 and 65535.`);
+    process.exit(1);
+  }
+  if (port < 1024 && process.getuid && process.getuid() !== 0) {
+    console.warn(`Warning: Port ${port} is a privileged port. You may need root permissions.`);
+  }
+}
+
+const PORT = parsePort();
+validatePort(PORT);
+
+const server = app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);
+});
+
+server.on('error', (error: NodeJS.ErrnoException) => {
+  if (error.code === 'EADDRINUSE') {
+    console.error(`Error: Port ${PORT} is already in use.`);
+    console.error('Please choose a different port using --port <number> or -p <number>');
+  } else if (error.code === 'EACCES') {
+    console.error(`Error: Permission denied to bind to port ${PORT}.`);
+    console.error('Try using a port number above 1024 or run with elevated privileges.');
+  } else if (error.code === 'EADDRNOTAVAIL') {
+    console.error(`Error: Address not available for port ${PORT}.`);
+  } else {
+    console.error(`Error: Failed to start server on port ${PORT}: ${error.message}`);
+  }
+  process.exit(1);
 });
