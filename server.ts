@@ -98,6 +98,33 @@ app.get("/", (_req, res) => {
       border-radius: 4px;
       font-family: monospace;
     }
+    .message-image {
+      max-width: 100%;
+      border-radius: 8px;
+      margin: 8px 0;
+      cursor: pointer;
+      transition: transform 0.2s;
+    }
+    .message-image:hover {
+      transform: scale(1.02);
+    }
+    .image-container {
+      margin: 8px 0;
+    }
+    .image-caption {
+      font-size: 12px;
+      color: #666;
+      margin-top: 4px;
+    }
+    .image-error {
+      background: #fff3f3;
+      border: 1px solid #ffcdd2;
+      color: #c62828;
+      padding: 12px 16px;
+      border-radius: 8px;
+      margin: 8px 0;
+      font-size: 13px;
+    }
     .input-container {
       padding: 16px 20px;
       background: white;
@@ -276,6 +303,49 @@ app.get("/", (_req, res) => {
             content.appendChild(text);
             break;
 
+          case 'image':
+            lastThinking = null;
+            const imgContainer = document.createElement('div');
+            imgContainer.className = 'image-container';
+
+            // Validate image source before rendering
+            const imgSrc = data.content;
+            if (!imgSrc || typeof imgSrc !== 'string') {
+              const errorDiv = document.createElement('div');
+              errorDiv.className = 'image-error';
+              errorDiv.textContent = '⚠️ Invalid image data received';
+              imgContainer.appendChild(errorDiv);
+            } else {
+              const img = document.createElement('img');
+              img.className = 'message-image';
+              img.alt = data.alt || 'Image';
+
+              // Error handling for failed image loads
+              img.onerror = () => {
+                img.remove();
+                const errorDiv = document.createElement('div');
+                errorDiv.className = 'image-error';
+                errorDiv.textContent = '⚠️ Failed to load image';
+                imgContainer.appendChild(errorDiv);
+              };
+
+              img.onload = () => {
+                img.onclick = () => window.open(img.src, '_blank');
+              };
+
+              img.src = imgSrc;
+              imgContainer.appendChild(img);
+
+              if (data.caption) {
+                const caption = document.createElement('div');
+                caption.className = 'image-caption';
+                caption.textContent = data.caption;
+                imgContainer.appendChild(caption);
+              }
+            }
+            content.appendChild(imgContainer);
+            break;
+
           case 'done':
             lastThinking = null;
             if (data.sessionId) {
@@ -338,6 +408,76 @@ app.get("/stream", async (req, res) => {
     res.write(`data: ${JSON.stringify(data)}\n\n`);
   };
 
+  // Allowed image media types for security
+  const ALLOWED_IMAGE_TYPES = new Set([
+    'image/png',
+    'image/jpeg',
+    'image/jpg',
+    'image/gif',
+    'image/webp',
+    'image/svg+xml'
+  ]);
+
+  // Maximum base64 image size (10MB decoded)
+  const MAX_IMAGE_SIZE = 10 * 1024 * 1024;
+
+  /**
+   * Safely process an image block with validation
+   * Returns the data URL if valid, null otherwise
+   */
+  const processImageBlock = (imageBlock: any): string | null => {
+    if (!imageBlock?.source) return null;
+
+    if (imageBlock.source.type === "base64") {
+      const mediaType = imageBlock.source.media_type || "image/png";
+      const data = imageBlock.source.data;
+
+      // Validate media type
+      if (!ALLOWED_IMAGE_TYPES.has(mediaType)) {
+        console.warn(`Rejected image with unsupported media type: ${mediaType}`);
+        return null;
+      }
+
+      // Validate base64 data exists and check size
+      if (!data || typeof data !== 'string') {
+        console.warn('Rejected image with invalid base64 data');
+        return null;
+      }
+
+      // Estimate decoded size (base64 is ~4/3 of original)
+      const estimatedSize = (data.length * 3) / 4;
+      if (estimatedSize > MAX_IMAGE_SIZE) {
+        console.warn(`Rejected image exceeding size limit: ${Math.round(estimatedSize / 1024 / 1024)}MB`);
+        return null;
+      }
+
+      return `data:${mediaType};base64,${data}`;
+    } else if (imageBlock.source.type === "url") {
+      const url = imageBlock.source.url;
+
+      // Basic URL validation
+      if (!url || typeof url !== 'string') {
+        return null;
+      }
+
+      // Only allow http/https URLs
+      try {
+        const parsed = new URL(url);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          console.warn(`Rejected image with non-http URL: ${parsed.protocol}`);
+          return null;
+        }
+      } catch {
+        console.warn('Rejected image with invalid URL');
+        return null;
+      }
+
+      return url;
+    }
+
+    return null;
+  };
+
   try {
     // Get existing session ID for this conversation (if any)
     const existingSessionId = conversationId ? conversations.get(conversationId) : undefined;
@@ -363,6 +503,12 @@ app.get("/stream", async (req, res) => {
         for (const block of message.message.content) {
           if ("text" in block && block.text) {
             send({ type: "thinking", content: block.text });
+          } else if ("type" in block && block.type === "image") {
+            // Handle image blocks from Claude with validation
+            const imageUrl = processImageBlock(block);
+            if (imageUrl) {
+              send({ type: "image", content: imageUrl });
+            }
           } else if ("name" in block) {
             const toolName = block.name;
             const toolInput = (block as any).input || {};
@@ -401,11 +547,27 @@ app.get("/stream", async (req, res) => {
         for (const block of message.message.content) {
           if ("type" in block && block.type === "tool_result") {
             const resultContent = (block as any).content;
-            const preview = typeof resultContent === "string"
-              ? resultContent.slice(0, 150) + (resultContent.length > 150 ? "..." : "")
-              : "OK";
 
-            send({ type: "tool_result", content: preview });
+            // Check if result contains image blocks (e.g., from Read tool on image files)
+            if (Array.isArray(resultContent)) {
+              for (const item of resultContent) {
+                if (item.type === "image") {
+                  // Use validated image processing
+                  const imageUrl = processImageBlock(item);
+                  if (imageUrl) {
+                    send({ type: "image", content: imageUrl });
+                  }
+                } else if (item.type === "text" && item.text) {
+                  const preview = item.text.slice(0, 150) + (item.text.length > 150 ? "..." : "");
+                  send({ type: "tool_result", content: preview });
+                }
+              }
+            } else {
+              const preview = typeof resultContent === "string"
+                ? resultContent.slice(0, 150) + (resultContent.length > 150 ? "..." : "")
+                : "OK";
+              send({ type: "tool_result", content: preview });
+            }
           }
         }
       }
